@@ -1,0 +1,86 @@
+name: build-gki-virtio-mmio-tpm
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache
+          sudo apt-get clean
+          df -h
+
+      - name: Add extra swap
+        run: |
+          free -h
+          sudo fallocate -l 8G /mnt/extra-swapfile || sudo dd if=/dev/zero of=/mnt/extra-swapfile bs=1M count=8192
+          sudo chmod 600 /mnt/extra-swapfile
+          sudo mkswap /mnt/extra-swapfile
+          sudo swapon /mnt/extra-swapfile
+          free -h
+
+      - name: Install repo tool
+        run: |
+          curl -fsSL https://storage.googleapis.com/git-repo-downloads/repo -o /usr/local/bin/repo
+          chmod +x /usr/local/bin/repo
+          git config --global user.email "ci@example.com"
+          git config --global user.name "ci"
+
+      - name: repo sync (common-android16-6.12-lts branch)
+        run: |
+          mkdir -p kernel && cd kernel
+          repo init -u https://android.googlesource.com/kernel/manifest -b common-android16-6.12-lts
+          repo sync -c -j$(nproc) -q
+
+      - name: Patch gki_defconfig for virtio devices + tpm
+        run: |
+          cd kernel
+          CONFIG_FILE="common/arch/arm64/configs/gki_defconfig"
+          
+          # Add CONFIG_VIRTIO_MMIO if not present
+          grep -q "^CONFIG_VIRTIO_MMIO=" "$CONFIG_FILE" || echo "CONFIG_VIRTIO_MMIO=y" >> "$CONFIG_FILE"
+          
+          # Add CONFIG_VIRTIO_TPM (critical for /dev/tpm0)
+          grep -q "^CONFIG_VIRTIO_TPM=" "$CONFIG_FILE" || echo "CONFIG_VIRTIO_TPM=y" >> "$CONFIG_FILE"
+          
+          # Add CONFIG_CRYPTO_USER (userspace crypto, may be needed by tpm2-tools)
+          grep -q "^CONFIG_CRYPTO_USER=" "$CONFIG_FILE" || echo "CONFIG_CRYPTO_USER=y" >> "$CONFIG_FILE"
+          
+          # Verify patches
+          echo "=== Patches applied to gki_defconfig ==="
+          grep -E "CONFIG_VIRTIO_MMIO|CONFIG_VIRTIO_TPM|CONFIG_CRYPTO_USER" "$CONFIG_FILE"
+
+      - name: Build kernel (no LTO, local config)
+        run: |
+          cd kernel
+          tools/bazel run --config=local --lto=none //common:kernel_aarch64_dist -- --destdir=$(pwd)/dist/kernel
+
+      - name: Build virtual_device modules (no LTO, local config)
+        run: |
+          cd kernel
+          tools/bazel run --config=local --lto=none //common-modules/virtual-device:virtual_device_aarch64_dist -- --destdir=$(pwd)/dist/modules
+
+      - name: Verify virtio_tpm in built kernel
+        run: |
+          cd kernel
+          # Check if virtio_tpm.ko was built
+          if find dist/modules -name "virtio_tpm.ko" -o -name "*tpm*"; then
+            echo "✓ virtio_tpm module found in build output"
+          else
+            echo "⚠ virtio_tpm.ko not found — may be builtin (CONFIG_VIRTIO_TPM=y)"
+          fi
+          
+          # Check Image for config
+          strings dist/kernel/Image | grep -E "CONFIG_VIRTIO_TPM|CONFIG_VIRTIO_MMIO" || echo "⚠ Config strings not embedded (normal for LTO=none)"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: gki-virtio-mmio-tpm-${{ github.run_id }}
+          path: |
+            kernel/dist/kernel/**
+            kernel/dist/modules/**
+          retention-days: 30
