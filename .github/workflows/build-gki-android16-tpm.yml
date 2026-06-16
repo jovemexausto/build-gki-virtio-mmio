@@ -45,7 +45,6 @@ jobs:
       - name: Verify kernel structure
         run: |
           ls -lh /tmp/kernel/
-          ls -lh /tmp/kernel/common/
           ls /tmp/kernel/common/arch/arm64/configs/
           
       - name: Patch kernel config
@@ -72,28 +71,28 @@ jobs:
         
       - name: Build kernel (aarch64)
         run: |
-          cd /tmp/kernel/common
+          cd /tmp/kernel
           echo "Building kernel..."
-          tools/bazel run --config=local --lto=none //common:kernel_aarch64_dist -- --destdir="$(pwd)/dist/kernel"
-          ls -lh dist/kernel/arch/arm64/boot/
+          ./tools/bazel run --config=local --lto=none //common:kernel_aarch64_dist -- --destdir=/tmp/kernel-dist/kernel
+          ls -lh /tmp/kernel-dist/kernel/arch/arm64/boot/
         
       - name: Build modules (virtual-device)
         run: |
-          cd /tmp/kernel/common
+          cd /tmp/kernel
           echo "Building modules..."
-          tools/bazel run --config=local --lto=none //common-modules/virtual-device:virtual_device_aarch64_dist -- --destdir="$(pwd)/dist/modules"
-          ls -lh dist/modules/ 2>/dev/null || echo "modules dir não existe"
+          ./tools/bazel run --config=local --lto=none //common-modules/virtual-device:virtual_device_aarch64_dist -- --destdir=/tmp/kernel-dist/modules
+          ls -lh /tmp/kernel-dist/modules/ 2>/dev/null || echo "modules dir não existe"
           
       - name: Collect artifacts
         run: |
           mkdir -p /tmp/artifacts/kernel /tmp/artifacts/modules
           
           echo "Copiando kernel..."
-          cp /tmp/kernel/common/dist/kernel/arch/arm64/boot/Image /tmp/artifacts/kernel/gki-Image
+          cp /tmp/kernel-dist/kernel/arch/arm64/boot/Image /tmp/artifacts/kernel/gki-Image
           
           echo "Copiando módulos..."
-          if [ -d "/tmp/kernel/common/dist/modules/lib/modules" ]; then
-            cp -r /tmp/kernel/common/dist/modules/lib/modules/* /tmp/artifacts/modules/ 2>/dev/null || true
+          if [ -d "/tmp/kernel-dist/modules/lib/modules" ]; then
+            cp -r /tmp/kernel-dist/modules/lib/modules/* /tmp/artifacts/modules/ 2>/dev/null || true
           else
             echo "⚠ Módulos não encontrados"
           fi
