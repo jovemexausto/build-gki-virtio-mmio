@@ -11,7 +11,9 @@ jobs:
     steps:
       - name: Free up disk space
         run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache
+          sudo rm -rf /usr/share/swift /usr/local/share/boost
+          sudo docker rmi $(docker images -q) 2>/dev/null || true
           sudo apt-get clean
           df -h
         
@@ -35,64 +37,36 @@ jobs:
         run: |
           mkdir -p /tmp/kernel && cd /tmp/kernel
           repo init -u https://android.googlesource.com/kernel/manifest -b common-android16-6.12
-          repo sync -c -j$(nproc) -q
+          repo sync -c -j$(nproc) -q --no-clone-bundle --depth=1
           
-      - name: Patch and normalize defconfig
+      - name: Patch defconfig (exact positions)
         run: |
           cd /tmp/kernel/common
           CONFIG="arch/arm64/configs/gki_defconfig"
           
-          echo "=== Original (relevant lines) ==="
+          echo "=== Before patch ==="
           grep -n -E "VIRTIO_BALLOON|VIRTIO_MMIO|TCG|CRYPTO_USER|BUG_ON_DATA" "$CONFIG" || true
           
-          # Remove any previous attempts
+          # Remove any previous
           sed -i '/^CONFIG_VIRTIO_MMIO=/d' "$CONFIG"
           sed -i '/^CONFIG_TCG_TPM=/d' "$CONFIG"
           sed -i '/^CONFIG_TCG_VTPM_PROXY=/d' "$CONFIG"
           sed -i '/^CONFIG_CRYPTO_USER=/d' "$CONFIG"
           
-          # Append configs — savedefconfig will reorder
-          echo "CONFIG_VIRTIO_MMIO=y" >> "$CONFIG"
-          echo "CONFIG_TCG_TPM=y" >> "$CONFIG"
-          echo "CONFIG_TCG_VTPM_PROXY=y" >> "$CONFIG"
-          echo "CONFIG_CRYPTO_USER=y" >> "$CONFIG"
+          # Insert at EXACT positions (from savedefconfig diff of run 1)
+          # VIRTIO_MMIO goes right after VIRTIO_BALLOON
+          sed -i '/^CONFIG_VIRTIO_BALLOON=m$/a CONFIG_VIRTIO_MMIO=y' "$CONFIG"
+          
+          # CRYPTO_USER goes right after BUG_ON_DATA_CORRUPTION
+          sed -i '/^CONFIG_BUG_ON_DATA_CORRUPTION=y$/a CONFIG_CRYPTO_USER=y' "$CONFIG"
+          
+          # TCG_TPM and TCG_VTPM_PROXY — insert near security section
+          # savedefconfig will tell us the right position if wrong
+          sed -i '/^CONFIG_SECURITY_LANDLOCK=y$/a CONFIG_TCG_TPM=y\nCONFIG_TCG_VTPM_PROXY=y' "$CONFIG"
           
           echo ""
-          echo "=== Added to defconfig ==="
-          tail -5 "$CONFIG"
-          
-          # NORMALIZE using AOSP's own clang (NOT system gcc)
-          echo ""
-          echo "=== Normalizing with AOSP toolchain ==="
-          
-          CLANG_BIN=$(ls -d /tmp/kernel/prebuilts/clang/host/linux-x86/clang-*/bin 2>/dev/null | sort -V | tail -1)
-          BUILD_TOOLS="/tmp/kernel/prebuilts/build-tools/linux-x86/bin"
-          
-          echo "Clang: $CLANG_BIN"
-          echo "Build tools: $BUILD_TOOLS"
-          
-          export PATH="$CLANG_BIN:$BUILD_TOOLS:$PATH"
-          
-          make -C /tmp/kernel/common ARCH=arm64 LLVM=1 O=/tmp/kernel-out gki_defconfig
-          make -C /tmp/kernel/common ARCH=arm64 LLVM=1 O=/tmp/kernel-out savedefconfig
-          
-          cp /tmp/kernel-out/defconfig "$CONFIG"
-          rm -rf /tmp/kernel-out
-          
-          echo ""
-          echo "=== Normalized defconfig (relevant lines) ==="
-          grep -n -E "VIRTIO_MMIO|TCG|CRYPTO_USER|RUST" "$CONFIG" || echo "WARNING: configs missing!"
-          
-          if ! grep -q "TCG_VTPM_PROXY" "$CONFIG"; then
-            echo ""
-            echo "!!! TCG_VTPM_PROXY dropped by savedefconfig !!!"
-            grep -r "TCG_VTPM_PROXY\|VTPM_PROXY" /tmp/kernel/common/drivers/char/tpm/Kconfig 2>/dev/null || echo "TCG_VTPM_PROXY not in Kconfig"
-          fi
-          
-          if ! grep -q "CONFIG_RUST" "$CONFIG"; then
-            echo ""
-            echo "!!! CONFIG_RUST dropped — this will break rust_binder !!!"
-          fi
+          echo "=== After patch ==="
+          grep -n -E "VIRTIO_MMIO|TCG|CRYPTO_USER" "$CONFIG"
         
       - name: Build kernel (aarch64)
         run: |
