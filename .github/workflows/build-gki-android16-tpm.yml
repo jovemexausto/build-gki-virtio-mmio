@@ -26,7 +26,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y python3 python3-dev build-essential git curl repo \
-            gcc-aarch64-linux-gnu bc flex bison libssl-dev libelf-dev
+            bc flex bison libssl-dev libelf-dev
           
           git config --global user.email "ci@capivara.dev"
           git config --global user.name "Capivara CI"
@@ -51,7 +51,7 @@ jobs:
           sed -i '/^CONFIG_TCG_VTPM_PROXY=/d' "$CONFIG"
           sed -i '/^CONFIG_CRYPTO_USER=/d' "$CONFIG"
           
-          # Append all new configs at the end — savedefconfig will reorder them
+          # Append configs — savedefconfig will reorder
           echo "CONFIG_VIRTIO_MMIO=y" >> "$CONFIG"
           echo "CONFIG_TCG_TPM=y" >> "$CONFIG"
           echo "CONFIG_TCG_VTPM_PROXY=y" >> "$CONFIG"
@@ -61,30 +61,37 @@ jobs:
           echo "=== Added to defconfig ==="
           tail -5 "$CONFIG"
           
-          # NORMALIZE: run make savedefconfig so Bazel's check passes
-          # This reorders configs and drops any that Kconfig doesn't recognize
+          # NORMALIZE using AOSP's own clang (NOT system gcc)
           echo ""
-          echo "=== Normalizing defconfig with savedefconfig ==="
-          cd /tmp/kernel/common
-          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- O=/tmp/kernel-out gki_defconfig
-          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- O=/tmp/kernel-out savedefconfig
+          echo "=== Normalizing with AOSP toolchain ==="
           
-          # Copy normalized defconfig back
+          CLANG_BIN=$(ls -d /tmp/kernel/prebuilts/clang/host/linux-x86/clang-*/bin 2>/dev/null | sort -V | tail -1)
+          BUILD_TOOLS="/tmp/kernel/prebuilts/build-tools/linux-x86/bin"
+          
+          echo "Clang: $CLANG_BIN"
+          echo "Build tools: $BUILD_TOOLS"
+          
+          export PATH="$CLANG_BIN:$BUILD_TOOLS:$PATH"
+          
+          make -C /tmp/kernel/common ARCH=arm64 LLVM=1 O=/tmp/kernel-out gki_defconfig
+          make -C /tmp/kernel/common ARCH=arm64 LLVM=1 O=/tmp/kernel-out savedefconfig
+          
           cp /tmp/kernel-out/defconfig "$CONFIG"
           rm -rf /tmp/kernel-out
           
           echo ""
           echo "=== Normalized defconfig (relevant lines) ==="
-          grep -n -E "VIRTIO_MMIO|TCG|CRYPTO_USER" "$CONFIG" || echo "WARNING: configs not found after normalize!"
+          grep -n -E "VIRTIO_MMIO|TCG|CRYPTO_USER|RUST" "$CONFIG" || echo "WARNING: configs missing!"
           
-          # If TCG_VTPM_PROXY was dropped, report it clearly
           if ! grep -q "TCG_VTPM_PROXY" "$CONFIG"; then
             echo ""
-            echo "!!! WARNING: CONFIG_TCG_VTPM_PROXY was dropped by savedefconfig !!!"
-            echo "This means the Kconfig option doesn't exist or has unmet dependencies."
-            echo "Checking what TCG options ARE available..."
-            find . -name "Kconfig*" -path "*/tpm/*" -exec grep -l "VTPM" {} \; 2>/dev/null || echo "No VTPM Kconfig found"
-            grep -r "TCG_VTPM_PROXY\|VTPM_PROXY" drivers/char/tpm/Kconfig 2>/dev/null || echo "TCG_VTPM_PROXY not in Kconfig"
+            echo "!!! TCG_VTPM_PROXY dropped by savedefconfig !!!"
+            grep -r "TCG_VTPM_PROXY\|VTPM_PROXY" /tmp/kernel/common/drivers/char/tpm/Kconfig 2>/dev/null || echo "TCG_VTPM_PROXY not in Kconfig"
+          fi
+          
+          if ! grep -q "CONFIG_RUST" "$CONFIG"; then
+            echo ""
+            echo "!!! CONFIG_RUST dropped — this will break rust_binder !!!"
           fi
         
       - name: Build kernel (aarch64)
