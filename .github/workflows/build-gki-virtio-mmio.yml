@@ -35,23 +35,28 @@ jobs:
           repo init -u https://android.googlesource.com/kernel/manifest -b common-android16-6.12-lts
           repo sync -c -j$(nproc) -q
 
-      - name: Patch gki_defconfig for virtio devices + tpm
+      - name: Patch gki_defconfig for virtio-mmio and virtio-tpm (in-place)
         run: |
           cd kernel
           CONFIG_FILE="common/arch/arm64/configs/gki_defconfig"
           
-          # Add CONFIG_VIRTIO_MMIO if not present
-          grep -q "^CONFIG_VIRTIO_MMIO=" "$CONFIG_FILE" || echo "CONFIG_VIRTIO_MMIO=y" >> "$CONFIG_FILE"
+          # Remove old entries if they exist (cleanup)
+          sed -i '/^CONFIG_VIRTIO_MMIO=/d' "$CONFIG_FILE"
+          sed -i '/^CONFIG_VIRTIO_TPM=/d' "$CONFIG_FILE"
+          sed -i '/^CONFIG_CRYPTO_USER=/d' "$CONFIG_FILE"
           
-          # Add CONFIG_VIRTIO_TPM (critical for /dev/tpm0)
-          grep -q "^CONFIG_VIRTIO_TPM=" "$CONFIG_FILE" || echo "CONFIG_VIRTIO_TPM=y" >> "$CONFIG_FILE"
+          # Insert VIRTIO_MMIO after VIRTIO_BALLOON
+          sed -i '/^CONFIG_VIRTIO_BALLOON=m$/a CONFIG_VIRTIO_MMIO=y\nCONFIG_VIRTIO_TPM=y' "$CONFIG_FILE"
           
-          # Add CONFIG_CRYPTO_USER (userspace crypto, may be needed by tpm2-tools)
-          grep -q "^CONFIG_CRYPTO_USER=" "$CONFIG_FILE" || echo "CONFIG_CRYPTO_USER=y" >> "$CONFIG_FILE"
+          # Insert CRYPTO_USER after BUG_ON_DATA_CORRUPTION
+          sed -i '/^CONFIG_BUG_ON_DATA_CORRUPTION=y$/a CONFIG_CRYPTO_USER=y' "$CONFIG_FILE"
           
-          # Verify patches
-          echo "=== Patches applied to gki_defconfig ==="
-          grep -E "CONFIG_VIRTIO_MMIO|CONFIG_VIRTIO_TPM|CONFIG_CRYPTO_USER" "$CONFIG_FILE"
+          # Verify
+          echo "=== Verification: VIRTIO section ==="
+          grep -A2 "CONFIG_VIRTIO_BALLOON" "$CONFIG_FILE"
+          echo ""
+          echo "=== Verification: CRYPTO section ==="
+          grep -A1 "CONFIG_BUG_ON_DATA_CORRUPTION" "$CONFIG_FILE"
 
       - name: Build kernel (no LTO, local config)
         run: |
@@ -66,15 +71,14 @@ jobs:
       - name: Verify virtio_tpm in built kernel
         run: |
           cd kernel
-          # Check if virtio_tpm.ko was built
-          if find dist/modules -name "virtio_tpm.ko" -o -name "*tpm*"; then
-            echo "✓ virtio_tpm module found in build output"
+          # Check for virtio_tpm module or builtin
+          if find dist/modules -name "virtio_tpm.ko" 2>/dev/null | grep -q .; then
+            echo "✓ virtio_tpm.ko found (module)"
+          elif strings dist/kernel/Image | grep -q "CONFIG_VIRTIO_TPM=y"; then
+            echo "✓ CONFIG_VIRTIO_TPM=y confirmed (builtin)"
           else
-            echo "⚠ virtio_tpm.ko not found — may be builtin (CONFIG_VIRTIO_TPM=y)"
+            echo "⚠ virtio_tpm status unknown — check log"
           fi
-          
-          # Check Image for config
-          strings dist/kernel/Image | grep -E "CONFIG_VIRTIO_TPM|CONFIG_VIRTIO_MMIO" || echo "⚠ Config strings not embedded (normal for LTO=none)"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
