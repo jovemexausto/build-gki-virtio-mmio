@@ -25,13 +25,8 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y python3 python3-dev build-essential git curl repo
-          
-          curl -fsSL https://bazel.build/bazel-release.pub.gpg | gpg --dearmor > /tmp/bazel-archive-keyring.gpg
-          sudo mv /tmp/bazel-archive-keyring.gpg /usr/share/keyrings
-          echo "deb [arch=amd64 signed-by=/usr/share/keyrings/bazel-archive-keyring.gpg] https://storage.googleapis.com/bazel-apt stable jdk1.8" | sudo tee /etc/apt/sources.list.d/bazel.list
-          sudo apt-get update
-          sudo apt-get install -y bazel
+          sudo apt-get install -y python3 python3-dev build-essential git curl repo \
+            gcc-aarch64-linux-gnu bc flex bison libssl-dev libelf-dev
           
           git config --global user.email "ci@capivara.dev"
           git config --global user.name "Capivara CI"
@@ -42,63 +37,90 @@ jobs:
           repo init -u https://android.googlesource.com/kernel/manifest -b common-android16-6.12
           repo sync -c -j$(nproc) -q
           
-      - name: Verify kernel structure
-        run: |
-          ls -lh /tmp/kernel/
-          ls /tmp/kernel/common/arch/arm64/configs/
-          
-      - name: Patch kernel config
+      - name: Patch and normalize defconfig
         run: |
           cd /tmp/kernel/common
           CONFIG="arch/arm64/configs/gki_defconfig"
           
-          echo "=== Original config (snippet) ==="
-          grep -E "VIRTIO_BALLOON|TCG|CRYPTO_USER" "$CONFIG" || echo "(não encontrados, vai adicionar)"
+          echo "=== Original (relevant lines) ==="
+          grep -n -E "VIRTIO_BALLOON|VIRTIO_MMIO|TCG|CRYPTO_USER|BUG_ON_DATA" "$CONFIG" || true
           
-          # Remove duplicatas (se existirem)
+          # Remove any previous attempts
           sed -i '/^CONFIG_VIRTIO_MMIO=/d' "$CONFIG"
+          sed -i '/^CONFIG_TCG_TPM=/d' "$CONFIG"
           sed -i '/^CONFIG_TCG_VTPM_PROXY=/d' "$CONFIG"
           sed -i '/^CONFIG_CRYPTO_USER=/d' "$CONFIG"
           
-          # Adiciona configs novas
+          # Append all new configs at the end — savedefconfig will reorder them
           echo "CONFIG_VIRTIO_MMIO=y" >> "$CONFIG"
+          echo "CONFIG_TCG_TPM=y" >> "$CONFIG"
           echo "CONFIG_TCG_VTPM_PROXY=y" >> "$CONFIG"
           echo "CONFIG_CRYPTO_USER=y" >> "$CONFIG"
           
           echo ""
-          echo "=== Configs adicionadas ==="
-          grep -E "VIRTIO_MMIO|TCG_VTPM_PROXY|CRYPTO_USER" "$CONFIG"
+          echo "=== Added to defconfig ==="
+          tail -5 "$CONFIG"
+          
+          # NORMALIZE: run make savedefconfig so Bazel's check passes
+          # This reorders configs and drops any that Kconfig doesn't recognize
+          echo ""
+          echo "=== Normalizing defconfig with savedefconfig ==="
+          cd /tmp/kernel/common
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- O=/tmp/kernel-out gki_defconfig
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- O=/tmp/kernel-out savedefconfig
+          
+          # Copy normalized defconfig back
+          cp /tmp/kernel-out/defconfig "$CONFIG"
+          rm -rf /tmp/kernel-out
+          
+          echo ""
+          echo "=== Normalized defconfig (relevant lines) ==="
+          grep -n -E "VIRTIO_MMIO|TCG|CRYPTO_USER" "$CONFIG" || echo "WARNING: configs not found after normalize!"
+          
+          # If TCG_VTPM_PROXY was dropped, report it clearly
+          if ! grep -q "TCG_VTPM_PROXY" "$CONFIG"; then
+            echo ""
+            echo "!!! WARNING: CONFIG_TCG_VTPM_PROXY was dropped by savedefconfig !!!"
+            echo "This means the Kconfig option doesn't exist or has unmet dependencies."
+            echo "Checking what TCG options ARE available..."
+            find . -name "Kconfig*" -path "*/tpm/*" -exec grep -l "VTPM" {} \; 2>/dev/null || echo "No VTPM Kconfig found"
+            grep -r "TCG_VTPM_PROXY\|VTPM_PROXY" drivers/char/tpm/Kconfig 2>/dev/null || echo "TCG_VTPM_PROXY not in Kconfig"
+          fi
         
       - name: Build kernel (aarch64)
         run: |
           cd /tmp/kernel
           echo "Building kernel..."
           ./tools/bazel run --config=local --lto=none //common:kernel_aarch64_dist -- --destdir=/tmp/kernel-dist/kernel
-          ls -lh /tmp/kernel-dist/kernel/arch/arm64/boot/
         
       - name: Build modules (virtual-device)
         run: |
           cd /tmp/kernel
           echo "Building modules..."
           ./tools/bazel run --config=local --lto=none //common-modules/virtual-device:virtual_device_aarch64_dist -- --destdir=/tmp/kernel-dist/modules
-          ls -lh /tmp/kernel-dist/modules/ 2>/dev/null || echo "modules dir não existe"
           
       - name: Collect artifacts
         run: |
-          mkdir -p /tmp/artifacts/kernel /tmp/artifacts/modules
+          mkdir -p /tmp/artifacts
           
-          echo "Copiando kernel..."
-          cp /tmp/kernel-dist/kernel/arch/arm64/boot/Image /tmp/artifacts/kernel/gki-Image
+          # Kernel image - try multiple possible locations
+          for f in \
+            /tmp/kernel-dist/kernel/Image \
+            /tmp/kernel-dist/kernel/arch/arm64/boot/Image \
+            /tmp/kernel-dist/kernel/boot.img; do
+            if [ -f "$f" ]; then
+              cp "$f" /tmp/artifacts/
+              echo "Found: $f"
+            fi
+          done
           
-          echo "Copiando módulos..."
-          if [ -d "/tmp/kernel-dist/modules/lib/modules" ]; then
-            cp -r /tmp/kernel-dist/modules/lib/modules/* /tmp/artifacts/modules/ 2>/dev/null || true
-          else
-            echo "⚠ Módulos não encontrados"
+          # Modules
+          if [ -d "/tmp/kernel-dist/modules" ]; then
+            cp -r /tmp/kernel-dist/modules/* /tmp/artifacts/ 2>/dev/null || true
           fi
           
           echo ""
-          echo "=== Artifacts finais ==="
+          echo "=== Final artifacts ==="
           ls -lhR /tmp/artifacts/
           
       - name: Upload artifacts
