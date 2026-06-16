@@ -36,44 +36,71 @@ jobs:
           git config --global user.email "ci@capivara.dev"
           git config --global user.name "Capivara CI"
         
-      - name: Repo sync
+      - name: Repo sync (common-android16-6.12)
         run: |
           mkdir -p /tmp/kernel && cd /tmp/kernel
-          repo init -u https://android.googlesource.com/kernel/manifest -b common-android16-6.12 -m common.xml
+          repo init -u https://android.googlesource.com/kernel/manifest -b common-android16-6.12
           repo sync -c -j$(nproc) -q
+          
+      - name: Verify kernel structure
+        run: |
+          ls -lh /tmp/kernel/
+          ls -lh /tmp/kernel/common/
+          ls /tmp/kernel/common/arch/arm64/configs/
           
       - name: Patch kernel config
         run: |
           cd /tmp/kernel/common
           CONFIG="arch/arm64/configs/gki_defconfig"
           
+          echo "=== Original config (snippet) ==="
+          grep -E "VIRTIO_BALLOON|TCG|CRYPTO_USER" "$CONFIG" || echo "(não encontrados, vai adicionar)"
+          
+          # Remove duplicatas (se existirem)
           sed -i '/^CONFIG_VIRTIO_MMIO=/d' "$CONFIG"
           sed -i '/^CONFIG_TCG_VTPM_PROXY=/d' "$CONFIG"
           sed -i '/^CONFIG_CRYPTO_USER=/d' "$CONFIG"
           
-          sed -i '/^CONFIG_VIRTIO_BALLOON=m$/a CONFIG_VIRTIO_MMIO=y' "$CONFIG"
-          sed -i '/^CONFIG_TCG=y$/a CONFIG_TCG_VTPM_PROXY=y' "$CONFIG"
-          sed -i '/^CONFIG_ASYMMETRIC_KEY_TYPE=y$/a CONFIG_CRYPTO_USER=y' "$CONFIG"
+          # Adiciona configs novas
+          echo "CONFIG_VIRTIO_MMIO=y" >> "$CONFIG"
+          echo "CONFIG_TCG_VTPM_PROXY=y" >> "$CONFIG"
+          echo "CONFIG_CRYPTO_USER=y" >> "$CONFIG"
           
+          echo ""
           echo "=== Configs adicionadas ==="
           grep -E "VIRTIO_MMIO|TCG_VTPM_PROXY|CRYPTO_USER" "$CONFIG"
         
-      - name: Build kernel
+      - name: Build kernel (aarch64)
         run: |
           cd /tmp/kernel/common
+          echo "Building kernel..."
           tools/bazel run --config=local --lto=none //common:kernel_aarch64_dist -- --destdir="$(pwd)/dist/kernel"
+          ls -lh dist/kernel/arch/arm64/boot/
         
-      - name: Build modules
+      - name: Build modules (virtual-device)
         run: |
           cd /tmp/kernel/common
+          echo "Building modules..."
           tools/bazel run --config=local --lto=none //common-modules/virtual-device:virtual_device_aarch64_dist -- --destdir="$(pwd)/dist/modules"
+          ls -lh dist/modules/ 2>/dev/null || echo "modules dir não existe"
           
       - name: Collect artifacts
         run: |
-          mkdir -p /tmp/artifacts
-          cp /tmp/kernel/common/dist/kernel/arch/arm64/boot/Image /tmp/artifacts/gki-Image
-          cp -r /tmp/kernel/common/dist/modules/lib/modules/* /tmp/artifacts/ 2>/dev/null || true
-          ls -lh /tmp/artifacts/
+          mkdir -p /tmp/artifacts/kernel /tmp/artifacts/modules
+          
+          echo "Copiando kernel..."
+          cp /tmp/kernel/common/dist/kernel/arch/arm64/boot/Image /tmp/artifacts/kernel/gki-Image
+          
+          echo "Copiando módulos..."
+          if [ -d "/tmp/kernel/common/dist/modules/lib/modules" ]; then
+            cp -r /tmp/kernel/common/dist/modules/lib/modules/* /tmp/artifacts/modules/ 2>/dev/null || true
+          else
+            echo "⚠ Módulos não encontrados"
+          fi
+          
+          echo ""
+          echo "=== Artifacts finais ==="
+          ls -lhR /tmp/artifacts/
           
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
