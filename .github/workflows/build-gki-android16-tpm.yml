@@ -51,20 +51,7 @@ jobs:
           # Add Kconfig entry
           KCONFIG="/tmp/kernel/common/drivers/char/tpm/Kconfig"
           if ! grep -q "TCG_VIRTIO" "$KCONFIG"; then
-            cat >> "$KCONFIG" << 'KCONFIG_ENTRY'
-
-config TCG_VIRTIO
-	tristate "Virtio TPM Interface"
-	depends on TCG_TPM && VIRTIO
-	help
-	  This driver provides TPM functionality via a virtio transport.
-	  The VMM (e.g. libkrun, crosvm) exposes a virtio device with a
-	  single virtqueue for TPM command/response exchange, backed by
-	  swtpm or a hardware TPM on the host.
-
-	  To compile this driver as a module, choose M here; the module
-	  will be called tpm_virtio.
-KCONFIG_ENTRY
+            printf '\nconfig TCG_VIRTIO\n\ttristate "Virtio TPM Interface"\n\tdepends on TCG_TPM && VIRTIO\n\thelp\n\t  This driver provides TPM via virtio transport.\n\t  The VMM exposes a virtio device (ID 29) with a single\n\t  virtqueue for TPM command/response exchange.\n\n\t  To compile as a module, choose M; module: tpm_virtio.\n' >> "$KCONFIG"
           fi
           
           # Add Makefile entry
