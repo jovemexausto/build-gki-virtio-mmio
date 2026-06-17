@@ -1,4 +1,4 @@
-name: Build GKI Android 16 + virtio-TPM
+name: build-gki-android16-virtio-mmio-tpm
 
 on:
   workflow_dispatch:
@@ -88,6 +88,7 @@ jobs:
           sed -i '/^CONFIG_TCG_VTPM_PROXY=/d' "$CONFIG"
           sed -i '/^CONFIG_TCG_VIRTIO=/d' "$CONFIG"
           sed -i '/^CONFIG_CRYPTO_USER=/d' "$CONFIG"
+          sed -i '/^# CONFIG_DRM_VIRTIO_GPU is not set$/c\CONFIG_DRM_VIRTIO_GPU=y' "$CONFIG"
           
           # Insert at EXACT positions (confirmed by savedefconfig)
           sed -i '/^CONFIG_VIRTIO_BALLOON=m$/a CONFIG_VIRTIO_MMIO=y' "$CONFIG"
@@ -97,6 +98,7 @@ jobs:
           echo ""
           echo "=== After patch ==="
           grep -n -E "VIRTIO_MMIO|TCG|CRYPTO_USER" "$CONFIG"
+          grep -n "DRM_VIRTIO_GPU" "$CONFIG"
         
       - name: Build kernel (aarch64)
         run: |
@@ -139,6 +141,6 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: gki-android16-virtio-tpm-${{ github.run_id }}
+          name: gki-android16-virtio-mmio-tpm-${{ github.run_id }}
           path: /tmp/artifacts/
           retention-days: 30
