@@ -88,12 +88,15 @@ jobs:
           sed -i '/^CONFIG_TCG_VTPM_PROXY=/d' "$CONFIG"
           sed -i '/^CONFIG_TCG_VIRTIO=/d' "$CONFIG"
           sed -i '/^CONFIG_CRYPTO_USER=/d' "$CONFIG"
+          sed -i '/^# CONFIG_DRM_VIRTIO_GPU is not set$/d' "$CONFIG"
+          sed -i '/^CONFIG_DRM_VIRTIO_GPU=/d' "$CONFIG"
           sed -i '/^# CONFIG_DRM_VIRTIO_GPU is not set$/c\CONFIG_DRM_VIRTIO_GPU=y' "$CONFIG"
           
           # Insert at EXACT positions (confirmed by savedefconfig)
           sed -i '/^CONFIG_VIRTIO_BALLOON=m$/a CONFIG_VIRTIO_MMIO=y' "$CONFIG"
           sed -i '/^CONFIG_BUG_ON_DATA_CORRUPTION=y$/a CONFIG_CRYPTO_USER=y' "$CONFIG"
           sed -i '/^# CONFIG_DEVPORT is not set$/a CONFIG_TCG_TPM=y\nCONFIG_TCG_VIRTIO=y' "$CONFIG"
+          echo "CONFIG_DRM_VIRTIO_GPU=y" >> "$CONFIG"
           
           echo ""
           echo "=== After patch ==="
