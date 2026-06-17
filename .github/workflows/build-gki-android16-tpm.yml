@@ -36,8 +36,8 @@ jobs:
       - name: Repo sync (common-android16-6.12)
         run: |
           mkdir -p /tmp/kernel && cd /tmp/kernel
-          repo init -u https://android.googlesource.com/kernel/manifest -b common-android16-6.12
-          repo sync -c -j$(nproc) -q --no-clone-bundle --depth=1
+          repo init -u https://android.googlesource.com/kernel/manifest -b common-android16-6.12 --depth=1
+          repo sync -c -j$(nproc) -q --no-clone-bundle
           
       - name: Patch defconfig (exact positions)
         run: |
