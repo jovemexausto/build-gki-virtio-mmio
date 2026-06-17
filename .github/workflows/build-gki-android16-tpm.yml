@@ -1,4 +1,4 @@
-name: Build GKI Android 16 + TPM
+name: Build GKI Android 16 + virtio-TPM
 
 on:
   workflow_dispatch:
@@ -9,6 +9,9 @@ jobs:
     timeout-minutes: 180
     
     steps:
+      - name: Checkout capivara
+        uses: actions/checkout@v4
+        
       - name: Free up disk space
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache
@@ -39,29 +42,70 @@ jobs:
           repo init -u https://android.googlesource.com/kernel/manifest -b common-android16-6.12 --depth=1
           repo sync -c -j$(nproc) -q --no-clone-bundle
           
-      - name: Patch defconfig (exact positions)
+      - name: Inject tpm_virtio driver into kernel tree
+        run: |
+          # Copy our driver
+          cp kernel/drivers/char/tpm/tpm_virtio.c \
+            /tmp/kernel/common/drivers/char/tpm/tpm_virtio.c
+          
+          # Add Kconfig entry
+          KCONFIG="/tmp/kernel/common/drivers/char/tpm/Kconfig"
+          if ! grep -q "TCG_VIRTIO" "$KCONFIG"; then
+            cat >> "$KCONFIG" << 'KCONFIG_ENTRY'
+
+config TCG_VIRTIO
+	tristate "Virtio TPM Interface"
+	depends on TCG_TPM && VIRTIO
+	help
+	  This driver provides TPM functionality via a virtio transport.
+	  The VMM (e.g. libkrun, crosvm) exposes a virtio device with a
+	  single virtqueue for TPM command/response exchange, backed by
+	  swtpm or a hardware TPM on the host.
+
+	  To compile this driver as a module, choose M here; the module
+	  will be called tpm_virtio.
+KCONFIG_ENTRY
+          fi
+          
+          # Add Makefile entry
+          MAKEFILE="/tmp/kernel/common/drivers/char/tpm/Makefile"
+          if ! grep -q "tpm_virtio" "$MAKEFILE"; then
+            echo "obj-\$(CONFIG_TCG_VIRTIO) += tpm_virtio.o" >> "$MAKEFILE"
+          fi
+          
+          # Add VIRTIO_ID_TPM to virtio_ids.h if missing
+          VIRTIO_IDS="/tmp/kernel/common/include/uapi/linux/virtio_ids.h"
+          if ! grep -q "VIRTIO_ID_TPM" "$VIRTIO_IDS"; then
+            # Insert before the closing endif or at end
+            sed -i '/^#endif/i #define VIRTIO_ID_TPM\t\t\t29 /* virtio TPM */' "$VIRTIO_IDS" || \
+              echo "#define VIRTIO_ID_TPM 29" >> "$VIRTIO_IDS"
+          fi
+          
+          echo "=== Injected files ==="
+          ls -la /tmp/kernel/common/drivers/char/tpm/tpm_virtio.c
+          grep -n "TCG_VIRTIO" "$KCONFIG"
+          grep -n "tpm_virtio" "$MAKEFILE"
+          grep "VIRTIO_ID_TPM" "$VIRTIO_IDS" || echo "VIRTIO_ID_TPM not in virtio_ids.h (fallback define in driver)"
+          
+      - name: Patch defconfig
         run: |
           cd /tmp/kernel/common
           CONFIG="arch/arm64/configs/gki_defconfig"
           
           echo "=== Before patch ==="
-          grep -n -E "VIRTIO_BALLOON|VIRTIO_MMIO|TCG|CRYPTO_USER|BUG_ON_DATA" "$CONFIG" || true
+          grep -n -E "VIRTIO_BALLOON|VIRTIO_MMIO|TCG|CRYPTO_USER|DEVPORT" "$CONFIG" || true
           
-          # Remove any previous
+          # Remove any previous attempts
           sed -i '/^CONFIG_VIRTIO_MMIO=/d' "$CONFIG"
           sed -i '/^CONFIG_TCG_TPM=/d' "$CONFIG"
           sed -i '/^CONFIG_TCG_VTPM_PROXY=/d' "$CONFIG"
+          sed -i '/^CONFIG_TCG_VIRTIO=/d' "$CONFIG"
           sed -i '/^CONFIG_CRYPTO_USER=/d' "$CONFIG"
           
-          # Insert at EXACT positions (from savedefconfig diff of run 1)
-          # VIRTIO_MMIO goes right after VIRTIO_BALLOON
+          # Insert at EXACT positions (confirmed by savedefconfig)
           sed -i '/^CONFIG_VIRTIO_BALLOON=m$/a CONFIG_VIRTIO_MMIO=y' "$CONFIG"
-          
-          # CRYPTO_USER goes right after BUG_ON_DATA_CORRUPTION
           sed -i '/^CONFIG_BUG_ON_DATA_CORRUPTION=y$/a CONFIG_CRYPTO_USER=y' "$CONFIG"
-          
-          # TCG_TPM and TCG_VTPM_PROXY — after DEVPORT (from savedefconfig diff)
-          sed -i '/^# CONFIG_DEVPORT is not set$/a CONFIG_TCG_TPM=y\nCONFIG_TCG_VTPM_PROXY=y' "$CONFIG"
+          sed -i '/^# CONFIG_DEVPORT is not set$/a CONFIG_TCG_TPM=y\nCONFIG_TCG_VIRTIO=y' "$CONFIG"
           
           echo ""
           echo "=== After patch ==="
@@ -83,7 +127,6 @@ jobs:
         run: |
           mkdir -p /tmp/artifacts
           
-          # Kernel image - try multiple possible locations
           for f in \
             /tmp/kernel-dist/kernel/Image \
             /tmp/kernel-dist/kernel/arch/arm64/boot/Image \
@@ -99,6 +142,9 @@ jobs:
             cp -r /tmp/kernel-dist/modules/* /tmp/artifacts/ 2>/dev/null || true
           fi
           
+          # Also grab the tpm_virtio module specifically if built as module
+          find /tmp/kernel -name "tpm_virtio.ko" -exec cp {} /tmp/artifacts/ \; 2>/dev/null || true
+          
           echo ""
           echo "=== Final artifacts ==="
           ls -lhR /tmp/artifacts/
@@ -106,6 +152,6 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: gki-android16-tpm-${{ github.run_id }}
+          name: gki-android16-virtio-tpm-${{ github.run_id }}
           path: /tmp/artifacts/
           retention-days: 30
