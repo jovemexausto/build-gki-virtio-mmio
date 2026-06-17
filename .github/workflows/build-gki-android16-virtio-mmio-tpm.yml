@@ -96,7 +96,7 @@ jobs:
           sed -i '/^CONFIG_VIRTIO_BALLOON=m$/a CONFIG_VIRTIO_MMIO=y' "$CONFIG"
           sed -i '/^CONFIG_BUG_ON_DATA_CORRUPTION=y$/a CONFIG_CRYPTO_USER=y' "$CONFIG"
           sed -i '/^# CONFIG_DEVPORT is not set$/a CONFIG_TCG_TPM=y\nCONFIG_TCG_VIRTIO=y' "$CONFIG"
-          echo "CONFIG_DRM_VIRTIO_GPU=y" >> "$CONFIG"
+          sed -i '/^CONFIG_DRM=y$/a CONFIG_DRM_VIRTIO_GPU=y' "$CONFIG"
           
           echo ""
           echo "=== After patch ==="
