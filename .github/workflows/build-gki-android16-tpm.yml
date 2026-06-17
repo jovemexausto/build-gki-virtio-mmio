@@ -45,7 +45,7 @@ jobs:
       - name: Inject tpm_virtio driver into kernel tree
         run: |
           # Copy our driver
-          cp kernel/drivers/char/tpm/tpm_virtio.c \
+          cp "$GITHUB_WORKSPACE/kernel/drivers/char/tpm/tpm_virtio.c" \
             /tmp/kernel/common/drivers/char/tpm/tpm_virtio.c
           
           # Add Kconfig entry
