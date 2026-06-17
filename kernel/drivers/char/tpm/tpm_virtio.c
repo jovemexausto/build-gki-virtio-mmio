@@ -25,6 +25,7 @@
 #include <linux/tpm.h>
 #include <linux/completion.h>
 #include <linux/scatterlist.h>
+#include "tpm.h"
 
 /* virtio device ID for TPM — matches crosvm and libkrun VMM side */
 #ifndef VIRTIO_ID_TPM
