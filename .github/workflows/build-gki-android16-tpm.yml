@@ -60,9 +60,8 @@ jobs:
           # CRYPTO_USER goes right after BUG_ON_DATA_CORRUPTION
           sed -i '/^CONFIG_BUG_ON_DATA_CORRUPTION=y$/a CONFIG_CRYPTO_USER=y' "$CONFIG"
           
-          # TCG_TPM and TCG_VTPM_PROXY — insert near security section
-          # savedefconfig will tell us the right position if wrong
-          sed -i '/^CONFIG_SECURITY_LANDLOCK=y$/a CONFIG_TCG_TPM=y\nCONFIG_TCG_VTPM_PROXY=y' "$CONFIG"
+          # TCG_TPM and TCG_VTPM_PROXY — after DEVPORT (from savedefconfig diff)
+          sed -i '/^# CONFIG_DEVPORT is not set$/a CONFIG_TCG_TPM=y\nCONFIG_TCG_VTPM_PROXY=y' "$CONFIG"
           
           echo ""
           echo "=== After patch ==="
