@@ -111,9 +111,15 @@ jobs:
       - name: Patch virtual-device fragment
         run: |
           VDEV_FRAGMENT="/tmp/kernel/common-modules/virtual-device/virtual_device_core.fragment"
+          echo "=== virtual_device_core.fragment path probe ==="
+          find /tmp/kernel -name "virtual_device_core.fragment" 2>/dev/null || true
           if [ -f "$VDEV_FRAGMENT" ]; then
+            echo "=== virtual_device_core.fragment before patch ==="
+            cat "$VDEV_FRAGMENT" | grep -n DRM || echo "DRM not found"
             sed -i '/^CONFIG_DRM_VIRTIO_GPU=/d' "$VDEV_FRAGMENT"
             echo "CONFIG_DRM_VIRTIO_GPU=y" >> "$VDEV_FRAGMENT"
+            echo "=== virtual_device_core.fragment after patch ==="
+            grep -n DRM "$VDEV_FRAGMENT" || echo "DRM not found after patch"
             echo "=== virtual-device fragment DRM_VIRTIO_GPU ==="
             grep -n "DRM_VIRTIO" "$VDEV_FRAGMENT" || echo "not found in fragment"
           else
