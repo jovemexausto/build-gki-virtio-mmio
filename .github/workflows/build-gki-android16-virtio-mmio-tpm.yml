@@ -42,34 +42,23 @@ jobs:
           repo init -u https://android.googlesource.com/kernel/manifest -b common-android16-6.12 --depth=1
           repo sync -c -j$(nproc) -q --no-clone-bundle
 
-      - name: Diagnose virtual-device fragment
-        run: |
-          grep -n "DRM_VIRTIO" /tmp/kernel/common-modules/virtual-device/virtual_device.fragment || echo "not present"
-          grep -n "DRM_VIRTIO" /tmp/kernel/common-modules/virtual-device/virtual_device_core.fragment 2>/dev/null || echo "not in core fragment"
-          grep -rn "DRM_VIRTIO" /tmp/kernel/common-modules/virtual-device/ 2>/dev/null || echo "not anywhere in virtual-device"
-           
       - name: Inject tpm_virtio driver into kernel tree
         run: |
-          # Copy our driver
           cp "$GITHUB_WORKSPACE/kernel/drivers/char/tpm/tpm_virtio.c" \
             /tmp/kernel/common/drivers/char/tpm/tpm_virtio.c
           
-          # Add Kconfig entry
           KCONFIG="/tmp/kernel/common/drivers/char/tpm/Kconfig"
           if ! grep -q "TCG_VIRTIO" "$KCONFIG"; then
             printf '\nconfig TCG_VIRTIO\n\ttristate "Virtio TPM Interface"\n\tdepends on TCG_TPM && VIRTIO\n\thelp\n\t  This driver provides TPM via virtio transport.\n\t  The VMM exposes a virtio device (ID 29) with a single\n\t  virtqueue for TPM command/response exchange.\n\n\t  To compile as a module, choose M; module: tpm_virtio.\n' >> "$KCONFIG"
           fi
           
-          # Add Makefile entry
           MAKEFILE="/tmp/kernel/common/drivers/char/tpm/Makefile"
           if ! grep -q "tpm_virtio" "$MAKEFILE"; then
             echo "obj-\$(CONFIG_TCG_VIRTIO) += tpm_virtio.o" >> "$MAKEFILE"
           fi
           
-          # Add VIRTIO_ID_TPM to virtio_ids.h if missing
           VIRTIO_IDS="/tmp/kernel/common/include/uapi/linux/virtio_ids.h"
           if ! grep -q "VIRTIO_ID_TPM" "$VIRTIO_IDS"; then
-            # Insert before the closing endif or at end
             sed -i '/^#endif/i #define VIRTIO_ID_TPM\t\t\t29 /* virtio TPM */' "$VIRTIO_IDS" || \
               echo "#define VIRTIO_ID_TPM 29" >> "$VIRTIO_IDS"
           fi
@@ -86,9 +75,9 @@ jobs:
           CONFIG="arch/arm64/configs/gki_defconfig"
           
           echo "=== Before patch ==="
-          grep -n -E "VIRTIO_BALLOON|VIRTIO_MMIO|TCG|CRYPTO_USER|DEVPORT" "$CONFIG" || true
+          grep -n -E "VIRTIO_BALLOON|VIRTIO_MMIO|TCG|CRYPTO_USER|DEVPORT|DRM_VIRTIO" "$CONFIG" || true
           
-          # Remove any previous attempts
+          # Remove any previous attempts / negations
           sed -i '/^CONFIG_VIRTIO_MMIO=/d' "$CONFIG"
           sed -i '/^CONFIG_TCG_TPM=/d' "$CONFIG"
           sed -i '/^CONFIG_TCG_VTPM_PROXY=/d' "$CONFIG"
@@ -97,7 +86,7 @@ jobs:
           sed -i '/^# CONFIG_DRM_VIRTIO_GPU is not set$/d' "$CONFIG"
           sed -i '/^CONFIG_DRM_VIRTIO_GPU=/d' "$CONFIG"
           
-          # Insert at EXACT positions (confirmed by savedefconfig)
+          # Insert at exact anchor positions (confirmed by savedefconfig diff)
           sed -i '/^CONFIG_VIRTIO_BALLOON=m$/a CONFIG_VIRTIO_MMIO=y' "$CONFIG"
           sed -i '/^CONFIG_BUG_ON_DATA_CORRUPTION=y$/a CONFIG_CRYPTO_USER=y' "$CONFIG"
           sed -i '/^# CONFIG_DEVPORT is not set$/a CONFIG_TCG_TPM=y\nCONFIG_TCG_VIRTIO=y' "$CONFIG"
@@ -105,46 +94,32 @@ jobs:
           
           echo ""
           echo "=== After patch ==="
-          grep -n -E "VIRTIO_MMIO|TCG|CRYPTO_USER" "$CONFIG"
-          grep -n "DRM_VIRTIO_GPU" "$CONFIG"
+          grep -n -E "VIRTIO_MMIO|TCG|CRYPTO_USER|DRM_VIRTIO" "$CONFIG"
 
-      - name: Patch virtual-device fragment
+      - name: Patch virtual-device configs and module lists
         run: |
-          VDEV_FRAGMENT="/tmp/kernel/common-modules/virtual-device/virtual_device_core.fragment"
-          echo "=== virtual_device_core.fragment path probe ==="
-          find /tmp/kernel -name "virtual_device_core.fragment" 2>/dev/null || true
-          if [ -f "$VDEV_FRAGMENT" ]; then
-            echo "=== virtual_device_core.fragment before patch ==="
-            cat "$VDEV_FRAGMENT" | grep -n DRM || echo "DRM not found"
-            sed -i '/^CONFIG_DRM_VIRTIO_GPU=/d' "$VDEV_FRAGMENT"
-            echo "CONFIG_DRM_VIRTIO_GPU=y" >> "$VDEV_FRAGMENT"
-            echo "=== virtual_device_core.fragment after patch ==="
-            grep -n DRM "$VDEV_FRAGMENT" || echo "DRM not found after patch"
-            echo "=== virtual-device fragment DRM_VIRTIO_GPU ==="
-            grep -n "DRM_VIRTIO" "$VDEV_FRAGMENT" || echo "not found in fragment"
-          else
-            echo "virtual_device.fragment not found at $VDEV_FRAGMENT"
+          # Fragment: override DRM_VIRTIO_GPU from =m to =y
+          VDEV_CORE="/tmp/kernel/common-modules/virtual-device/virtual_device_core.fragment"
+          if [ -f "$VDEV_CORE" ]; then
+            sed -i '/^CONFIG_DRM_VIRTIO_GPU=/d' "$VDEV_CORE"
+            echo "CONFIG_DRM_VIRTIO_GPU=y" >> "$VDEV_CORE"
+            echo "=== virtual_device_core.fragment ==="
+            grep -n "DRM_VIRTIO" "$VDEV_CORE"
           fi
 
-      - name: Patch virtual-device module list
-        run: |
-          MODULES_LIST="/tmp/kernel/common-modules/virtual-device/modules.bzl"
-          if [ -f "$MODULES_LIST" ]; then
-            sed -i '/virtio-gpu\.ko/d' "$MODULES_LIST"
-            sed -i '/virtio_dma_buf\.ko/d' "$MODULES_LIST"
-            echo "=== modules.bzl após remoção ==="
-            grep -n "virtio" "$MODULES_LIST" || echo "nenhum virtio restante"
-          fi
+          # Module lists: remove virtio-gpu.ko and virtio_dma_buf.ko
+          # (now built-in, not modules)
+          echo "=== Arquivos com virtio-gpu.ko ou virtio_dma_buf.ko ==="
+          grep -rn "virtio.gpu\.ko\|virtio_dma_buf\.ko" /tmp/kernel/common-modules/virtual-device/ 2>/dev/null || echo "nenhum encontrado"
 
-          for f in \
-            /tmp/kernel/common-modules/virtual-device/modules.list \
-            /tmp/kernel/common-modules/virtual-device/virtual_device_modules.bzl; do
-            if [ -f "$f" ]; then
-              sed -i '/virtio-gpu\.ko/d' "$f"
-              sed -i '/virtio_dma_buf\.ko/d' "$f"
-              echo "Patched: $f"
-            fi
+          grep -rl "virtio.gpu\.ko\|virtio_dma_buf\.ko" /tmp/kernel/common-modules/virtual-device/ 2>/dev/null | while read f; do
+            echo "Patching: $f"
+            sed -i '/virtio.gpu\.ko/d' "$f"
+            sed -i '/virtio_dma_buf\.ko/d' "$f"
           done
+
+          echo "=== Verificação pós-patch ==="
+          grep -rn "virtio.gpu\.ko\|virtio_dma_buf\.ko" /tmp/kernel/common-modules/virtual-device/ 2>/dev/null || echo "limpo"
         
       - name: Build kernel (aarch64)
         run: |
@@ -172,12 +147,10 @@ jobs:
             fi
           done
           
-          # Modules
           if [ -d "/tmp/kernel-dist/modules" ]; then
             cp -r /tmp/kernel-dist/modules/* /tmp/artifacts/ 2>/dev/null || true
           fi
           
-          # Also grab the tpm_virtio module specifically if built as module
           find /tmp/kernel -name "tpm_virtio.ko" -exec cp {} /tmp/artifacts/ \; 2>/dev/null || true
           
           echo ""
