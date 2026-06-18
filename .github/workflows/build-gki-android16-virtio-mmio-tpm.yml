@@ -96,43 +96,12 @@ jobs:
           echo "=== After patch ==="
           grep -n -E "VIRTIO_MMIO|TCG|CRYPTO_USER|DRM_VIRTIO" "$CONFIG"
 
-      - name: Patch virtual-device configs and module lists
-        run: |
-          # Fragment: override DRM_VIRTIO_GPU from =m to =y
-          VDEV_CORE="/tmp/kernel/common-modules/virtual-device/virtual_device_core.fragment"
-          if [ -f "$VDEV_CORE" ]; then
-            sed -i '/^CONFIG_DRM_VIRTIO_GPU=/d' "$VDEV_CORE"
-            echo "CONFIG_DRM_VIRTIO_GPU=y" >> "$VDEV_CORE"
-            echo "=== virtual_device_core.fragment ==="
-            grep -n "DRM_VIRTIO" "$VDEV_CORE"
-          fi
-
-          # Module lists: remove virtio-gpu.ko and virtio_dma_buf.ko
-          # (now built-in, not modules)
-          echo "=== Arquivos com virtio-gpu.ko ou virtio_dma_buf.ko ==="
-          grep -rn "virtio.gpu\.ko\|virtio_dma_buf\.ko" /tmp/kernel/common-modules/virtual-device/ 2>/dev/null || echo "nenhum encontrado"
-
-          grep -rl "virtio.gpu\.ko\|virtio_dma_buf\.ko" /tmp/kernel/common-modules/virtual-device/ 2>/dev/null | while read f; do
-            echo "Patching: $f"
-            sed -i '/virtio.gpu\.ko/d' "$f"
-            sed -i '/virtio_dma_buf\.ko/d' "$f"
-          done
-
-          echo "=== Verificação pós-patch ==="
-          grep -rn "virtio.gpu\.ko\|virtio_dma_buf\.ko" /tmp/kernel/common-modules/virtual-device/ 2>/dev/null || echo "limpo"
-        
       - name: Build kernel (aarch64)
         run: |
           cd /tmp/kernel
           echo "Building kernel..."
           ./tools/bazel run --config=local --lto=none //common:kernel_aarch64_dist -- --destdir=/tmp/kernel-dist/kernel
         
-      - name: Build modules (virtual-device)
-        run: |
-          cd /tmp/kernel
-          echo "Building modules..."
-          ./tools/bazel run --config=local --lto=none //common-modules/virtual-device:virtual_device_aarch64_dist -- --destdir=/tmp/kernel-dist/modules
-          
       - name: Collect artifacts
         run: |
           mkdir -p /tmp/artifacts
