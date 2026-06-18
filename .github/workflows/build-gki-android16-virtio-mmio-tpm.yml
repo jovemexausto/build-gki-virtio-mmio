@@ -125,6 +125,26 @@ jobs:
           else
             echo "virtual_device.fragment not found at $VDEV_FRAGMENT"
           fi
+
+      - name: Patch virtual-device module list
+        run: |
+          MODULES_LIST="/tmp/kernel/common-modules/virtual-device/modules.bzl"
+          if [ -f "$MODULES_LIST" ]; then
+            sed -i '/virtio-gpu\.ko/d' "$MODULES_LIST"
+            sed -i '/virtio_dma_buf\.ko/d' "$MODULES_LIST"
+            echo "=== modules.bzl após remoção ==="
+            grep -n "virtio" "$MODULES_LIST" || echo "nenhum virtio restante"
+          fi
+
+          for f in \
+            /tmp/kernel/common-modules/virtual-device/modules.list \
+            /tmp/kernel/common-modules/virtual-device/virtual_device_modules.bzl; do
+            if [ -f "$f" ]; then
+              sed -i '/virtio-gpu\.ko/d' "$f"
+              sed -i '/virtio_dma_buf\.ko/d' "$f"
+              echo "Patched: $f"
+            fi
+          done
         
       - name: Build kernel (aarch64)
         run: |
