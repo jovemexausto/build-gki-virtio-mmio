@@ -68,6 +68,16 @@ jobs:
           grep -n "TCG_VIRTIO" "$KCONFIG"
           grep -n "tpm_virtio" "$MAKEFILE"
           grep "VIRTIO_ID_TPM" "$VIRTIO_IDS" || echo "VIRTIO_ID_TPM not in virtio_ids.h (fallback define in driver)"
+
+      - name: Force kernel SUBLEVEL to match initramfs vermagic
+        run: |
+          cd /tmp/kernel/common
+          echo "=== Before version patch ==="
+          grep -E "^(VERSION|PATCHLEVEL|SUBLEVEL) =" Makefile || true
+          # The current guest initramfs expects modules built for 6.12.89-android16-6-maybe-dirty-4k
+          sed -i 's/^SUBLEVEL = .*/SUBLEVEL = 89/' Makefile
+          echo "=== After version patch ==="
+          grep -E "^(VERSION|PATCHLEVEL|SUBLEVEL) =" Makefile || true
           
       - name: Patch defconfig
         run: |
