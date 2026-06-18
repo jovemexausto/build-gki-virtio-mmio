@@ -41,7 +41,13 @@ jobs:
           mkdir -p /tmp/kernel && cd /tmp/kernel
           repo init -u https://android.googlesource.com/kernel/manifest -b common-android16-6.12 --depth=1
           repo sync -c -j$(nproc) -q --no-clone-bundle
-          
+
+      - name: Diagnose virtual-device fragment
+        run: |
+          grep -n "DRM_VIRTIO" /tmp/kernel/common-modules/virtual-device/virtual_device.fragment || echo "not present"
+          grep -n "DRM_VIRTIO" /tmp/kernel/common-modules/virtual-device/virtual_device_core.fragment 2>/dev/null || echo "not in core fragment"
+          grep -rn "DRM_VIRTIO" /tmp/kernel/common-modules/virtual-device/ 2>/dev/null || echo "not anywhere in virtual-device"
+           
       - name: Inject tpm_virtio driver into kernel tree
         run: |
           # Copy our driver
@@ -90,7 +96,6 @@ jobs:
           sed -i '/^CONFIG_CRYPTO_USER=/d' "$CONFIG"
           sed -i '/^# CONFIG_DRM_VIRTIO_GPU is not set$/d' "$CONFIG"
           sed -i '/^CONFIG_DRM_VIRTIO_GPU=/d' "$CONFIG"
-          sed -i '/^# CONFIG_DRM_VIRTIO_GPU is not set$/c\CONFIG_DRM_VIRTIO_GPU=y' "$CONFIG"
           
           # Insert at EXACT positions (confirmed by savedefconfig)
           sed -i '/^CONFIG_VIRTIO_BALLOON=m$/a CONFIG_VIRTIO_MMIO=y' "$CONFIG"
@@ -102,6 +107,18 @@ jobs:
           echo "=== After patch ==="
           grep -n -E "VIRTIO_MMIO|TCG|CRYPTO_USER" "$CONFIG"
           grep -n "DRM_VIRTIO_GPU" "$CONFIG"
+
+      - name: Patch virtual-device fragment
+        run: |
+          VDEV_FRAGMENT="/tmp/kernel/common-modules/virtual-device/virtual_device.fragment"
+          if [ -f "$VDEV_FRAGMENT" ]; then
+            sed -i '/^CONFIG_DRM_VIRTIO_GPU=/d' "$VDEV_FRAGMENT"
+            echo "CONFIG_DRM_VIRTIO_GPU=y" >> "$VDEV_FRAGMENT"
+            echo "=== virtual-device fragment DRM_VIRTIO_GPU ==="
+            grep -n "DRM_VIRTIO" "$VDEV_FRAGMENT" || echo "not found in fragment"
+          else
+            echo "virtual_device.fragment not found at $VDEV_FRAGMENT"
+          fi
         
       - name: Build kernel (aarch64)
         run: |
