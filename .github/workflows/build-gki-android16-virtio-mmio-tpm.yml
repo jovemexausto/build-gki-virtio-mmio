@@ -110,7 +110,7 @@ jobs:
 
       - name: Patch virtual-device fragment
         run: |
-          VDEV_FRAGMENT="/tmp/kernel/common-modules/virtual-device/virtual_device.fragment"
+          VDEV_FRAGMENT="/tmp/kernel/common-modules/virtual-device/virtual_device_core.fragment"
           if [ -f "$VDEV_FRAGMENT" ]; then
             sed -i '/^CONFIG_DRM_VIRTIO_GPU=/d' "$VDEV_FRAGMENT"
             echo "CONFIG_DRM_VIRTIO_GPU=y" >> "$VDEV_FRAGMENT"
