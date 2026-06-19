@@ -95,7 +95,8 @@ jobs:
           sed -i '/^CONFIG_CRYPTO_USER=/d' "$CONFIG"
           sed -i '/^# CONFIG_DRM_VIRTIO_GPU is not set$/d' "$CONFIG"
           sed -i '/^CONFIG_DRM_VIRTIO_GPU=/d' "$CONFIG"
-          
+          sed -i 's/ bootconfig//' "$CONFIG"
+
           # Insert at exact anchor positions (confirmed by savedefconfig diff)
           sed -i '/^CONFIG_VIRTIO_BALLOON=m$/a CONFIG_VIRTIO_MMIO=y' "$CONFIG"
           sed -i '/^CONFIG_BUG_ON_DATA_CORRUPTION=y$/a CONFIG_CRYPTO_USER=y' "$CONFIG"
