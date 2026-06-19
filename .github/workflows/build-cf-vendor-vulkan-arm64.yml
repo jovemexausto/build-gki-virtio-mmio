@@ -1,0 +1,177 @@
+name: build-cf-vendor-vulkan-arm64
+
+# Builda os módulos vendor relacionados ao gfxstream/Vulkan
+# (vulkan.ranchu + libs de suporte) para arm64.
+#
+# STATUS: separado do workflow de kernel por enquanto. A tentativa anterior
+# de fundir os dois num job só usava um `.repo/manifests` montado à mão
+# (git init manual + commit) para simular um manifest "pinned" sem
+# reconsultar a branch — isso quebra, porque o `repo` tool exige que esse
+# diretório seja resultado de um clone feito por ELE MESMO (estrutura
+# interna de refs própria); um git repo criado manualmente não é
+# reconhecido (erro: "unsupported checkout state").
+#
+# Por ora este workflow faz um `repo init -b android16-release` direto e
+# simples (sem pinning), para estabilizar o build do vendor isoladamente.
+# Quando isso estiver funcionando de ponta a ponta, voltamos a mesclar com
+# o workflow do kernel, usando desta vez o mecanismo OFICIAL de pinning do
+# repo tool: `repo init --standalone-manifest --manifest-url=file://<path>`.
+# Essa flag existe especificamente para isso (baixa o XML como arquivo
+# estático, sem montar um manifest git checkout) — mas tem reports de bugs
+# de versão em alguns casos, então vale testar isolado antes de depender
+# dela em produção.
+
+on:
+  workflow_dispatch:
+    inputs:
+      platform_branch:
+        description: 'Branch do platform/manifest'
+        required: false
+        default: 'android16-release'
+      lunch_target:
+        description: 'Target lunch (deve bater arch/variant com o kernel arm64)'
+        required: false
+        default: 'aosp_cf_arm64_phone-userdebug'
+
+jobs:
+  build-vendor-vulkan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache
+          sudo rm -rf /usr/share/swift /usr/local/share/boost
+          sudo docker rmi $(docker images -q) 2>/dev/null || true
+          sudo apt-get clean
+          df -h
+
+      - name: Add extra swap
+        run: |
+          sudo dd if=/dev/zero of=/mnt/extra-swapfile bs=1M count=8192
+          sudo chmod 600 /mnt/extra-swapfile
+          sudo mkswap /mnt/extra-swapfile
+          sudo swapon /mnt/extra-swapfile
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3 python3-dev build-essential git curl repo \
+            bc flex bison libssl-dev libelf-dev openjdk-17-jdk-headless rsync \
+            libxml2-utils zip unzip
+
+          git config --global user.email "ci@capivara.dev"
+          git config --global user.name "Capivara CI"
+
+      - name: Repo init (platform manifest)
+        run: |
+          mkdir -p /tmp/platform && cd /tmp/platform
+          repo init -u https://android.googlesource.com/platform/manifest \
+            -b "${{ github.event.inputs.platform_branch || 'android16-release' }}" \
+            --partial-clone --clone-filter=blob:limit=10M --depth=1
+
+      - name: Cache .repo
+        uses: actions/cache@v4
+        with:
+          path: /tmp/platform/.repo
+          key: repo-platform-${{ github.event.inputs.platform_branch || 'android16-release' }}-${{ github.run_id }}
+          restore-keys: |
+            repo-platform-${{ github.event.inputs.platform_branch || 'android16-release' }}-
+
+      - name: Repo sync
+        run: |
+          cd /tmp/platform
+          repo sync -c -j$(nproc) -q --no-clone-bundle --force-sync
+
+      - name: Registrar manifest efetivamente usado (auditoria)
+        run: |
+          cd /tmp/platform
+          mkdir -p /tmp/artifacts-prelim
+          repo manifest -r -o /tmp/artifacts-prelim/effective-manifest-vendor.xml
+
+      - name: Lunch + validar TARGET_VULKAN_SUPPORT
+        run: |
+          cd /tmp/platform
+          source build/envsetup.sh
+          lunch "${{ github.event.inputs.lunch_target || 'aosp_cf_arm64_phone-userdebug' }}"
+          get_build_var TARGET_VULKAN_SUPPORT || echo "AVISO: TARGET_VULKAN_SUPPORT não definido ou get_build_var falhou — vulkan.ranchu pode não entrar no grafo de build."
+        shell: bash
+
+      - name: Build módulos Vulkan/gfxstream (mm direcionado)
+        run: |
+          cd /tmp/platform
+          source build/envsetup.sh
+          lunch "${{ github.event.inputs.lunch_target || 'aosp_cf_arm64_phone-userdebug' }}"
+
+          m vulkan.ranchu \
+            libvulkan_enc \
+            vulkan.pastel \
+            hwcomposer.ranchu \
+            libandroidemu \
+            libOpenglCodecCommon \
+            libOpenglSystemCommon \
+            libGLESv1_CM_emulation \
+            lib_renderControl_enc \
+            libEGL_emulation \
+            libGLESv2_enc \
+            libGLESv2_emulation \
+            libGLESv1_enc \
+            -j$(nproc) 2>&1 | tee /tmp/build-vulkan.log
+
+      - name: Localizar artefatos gerados
+        run: |
+          cd /tmp/platform
+          find out/target/product -iname "vulkan.ranchu*" -o -iname "vulkan.pastel*" \
+            -o -iname "libvulkan_enc*" -o -iname "hwcomposer.ranchu*" \
+            -o -iname "libandroidemu*" -o -iname "libOpenglCodecCommon*" \
+            -o -iname "libOpenglSystemCommon*" -o -iname "libGLESv1_CM_emulation*" \
+            -o -iname "lib_renderControl_enc*" -o -iname "libEGL_emulation*" \
+            -o -iname "libGLESv2_enc*" -o -iname "libGLESv2_emulation*" \
+            -o -iname "libGLESv1_enc*" 2>/dev/null | tee /tmp/artifact-paths.txt
+
+          if [ ! -s /tmp/artifact-paths.txt ]; then
+            echo "ERRO: nenhum artefato encontrado. Verifique /tmp/build-vulkan.log e"
+            echo "confirme TARGET_VULKAN_SUPPORT=true para o lunch_target usado."
+            exit 1
+          fi
+
+      - name: Coletar artefatos
+        run: |
+          mkdir -p /tmp/artifacts/vendor/lib64/hw /tmp/artifacts/vendor/lib64 /tmp/artifacts/logs
+          cd /tmp/platform
+
+          while IFS= read -r f; do
+            case "$f" in
+              */hw/*) cp -v "$f" /tmp/artifacts/vendor/lib64/hw/ 2>/dev/null || true ;;
+              *) cp -v "$f" /tmp/artifacts/vendor/lib64/ 2>/dev/null || true ;;
+            esac
+          done < /tmp/artifact-paths.txt
+
+          cp /tmp/build-vulkan.log /tmp/artifacts/logs/
+          cp /tmp/artifact-paths.txt /tmp/artifacts/logs/
+          cp /tmp/artifacts-prelim/effective-manifest-vendor.xml /tmp/artifacts/logs/ 2>/dev/null || true
+
+          cat > /tmp/artifacts/logs/file_contexts.snippet.txt << 'EOF'
+          /vendor/lib(64)?/hw/vulkan\.ranchu\.so u:object_r:same_process_hal_file:s0
+          /vendor/lib(64)?/libEGL_emulation\.so u:object_r:same_process_hal_file:s0
+          /vendor/lib(64)?/libGLESv1_CM_emulation\.so u:object_r:same_process_hal_file:s0
+          /vendor/lib(64)?/libGLESv2_emulation\.so u:object_r:same_process_hal_file:s0
+          /vendor/lib(64)?/libOpenglCodecCommon\.so u:object_r:same_process_hal_file:s0
+          /vendor/lib(64)?/libOpenglSystemCommon\.so u:object_r:same_process_hal_file:s0
+          /vendor/lib(64)?/lib_renderControl_enc\.so u:object_r:same_process_hal_file:s0
+          /vendor/lib(64)?/libGLESv1_enc\.so u:object_r:same_process_hal_file:s0
+          /vendor/lib(64)?/libGLESv2_enc\.so u:object_r:same_process_hal_file:s0
+          /vendor/lib(64)?/libvulkan_enc\.so u:object_r:same_process_hal_file:s0
+          /vendor/lib(64)?/hw/vulkan\.pastel\.so u:object_r:same_process_hal_file:s0
+          EOF
+
+          echo "=== Final artifacts ==="
+          ls -lhR /tmp/artifacts/
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: cf-vendor-vulkan-arm64-${{ github.run_id }}
+          path: /tmp/artifacts/
+          retention-days: 30
