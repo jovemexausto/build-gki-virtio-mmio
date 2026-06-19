@@ -84,6 +84,10 @@ jobs:
           cd /tmp/kernel/common
           CONFIG="arch/arm64/configs/gki_defconfig"
           
+          echo "=== CONFIG_CMDLINE em todos os configs ==="
+          grep -rn "CONFIG_CMDLINE" /tmp/kernel/common/arch/arm64/configs/ 2>/dev/null || true
+          grep -rn "CONFIG_CMDLINE" /tmp/kernel/common/arch/arm64/ 2>/dev/null | grep -v "\.o:" | head -20 || true
+          
           echo "=== Before patch ==="
           grep -n -E "VIRTIO_BALLOON|VIRTIO_MMIO|TCG|CRYPTO_USER|DEVPORT|DRM_VIRTIO" "$CONFIG" || true
           
