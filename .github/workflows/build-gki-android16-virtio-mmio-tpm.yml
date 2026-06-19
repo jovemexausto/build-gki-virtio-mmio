@@ -87,6 +87,16 @@ jobs:
           echo "=== CONFIG_CMDLINE em todos os configs ==="
           grep -rn "CONFIG_CMDLINE" /tmp/kernel/common/arch/arm64/configs/ 2>/dev/null || true
           grep -rn "CONFIG_CMDLINE" /tmp/kernel/common/arch/arm64/ 2>/dev/null | grep -v "\.o:" | head -20 || true
+
+          echo "=== Todos os arquivos com bootconfig ==="
+          grep -rn "bootconfig" /tmp/kernel/common/arch/ 2>/dev/null | grep -v "\.o:" | head -50 || true
+
+          echo "=== Removendo bootconfig de todos os configs ==="
+          grep -rl "bootconfig" /tmp/kernel/common/arch/ 2>/dev/null | while read -r f; do
+            echo "Patching: $f"
+            sed -i 's/ bootconfig//g' "$f"
+            sed -i 's/bootconfig //g' "$f"
+          done
           
           echo "=== Before patch ==="
           grep -n -E "VIRTIO_BALLOON|VIRTIO_MMIO|TCG|CRYPTO_USER|DEVPORT|DRM_VIRTIO" "$CONFIG" || true
