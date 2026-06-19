@@ -1,0 +1,334 @@
+name: build-capivara-full-stack
+
+# Workflow único que builda, na MESMA execução:
+#   1. Kernel GKI arm64 (virtio-mmio + tpm_virtio), branch common-android16-6.12
+#   2. Módulos vendor Vulkan/gfxstream (vulkan.ranchu + libs), branch android16-release
+#
+# Por que fundido em um job só:
+# Os dois syncs (kernel/manifest e platform/manifest) precisam vir do MESMO
+# instante no AOSP para garantir ABI/KMI compatível entre kernel e
+# userspace. Antes isto era feito como dois workflows separados, com
+# pinning manual via artifact + run_id — frágil porque dependia de copiar
+# o run_id certo na hora certa. Fundindo num job sequencial, os dois syncs
+# acontecem segundos um do outro, sem handoff manual.
+#
+# Trade-off aceito: o job fica mais longo (kernel + vendor no mesmo run),
+# e se só o vendor falhar é preciso rerodar o workflow inteiro (incluindo
+# o kernel, que é rápido comparado ao vendor). Isso é preferível ao risco
+# de buildar silenciosamente um par kernel/vendor incompatível.
+
+on:
+  workflow_dispatch:
+    inputs:
+      lunch_target:
+        description: 'Target lunch para o vendor build (arch/variant deve bater com arm64)'
+        required: false
+        default: 'aosp_cf_arm64_phone-userdebug'
+      skip_vendor_build:
+        description: 'Buildar só o kernel, pular a etapa de vendor (debug)'
+        type: boolean
+        required: false
+        default: false
+
+jobs:
+  build-full-stack:
+    runs-on: ubuntu-latest
+    timeout-minutes: 480  # kernel (~1-2h) + vendor sync+build completo AOSP (~3-5h)
+
+    steps:
+      # ============================================================
+      # SETUP COMUM
+      # ============================================================
+      - name: Checkout capivara
+        uses: actions/checkout@v4
+
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache
+          sudo rm -rf /usr/share/swift /usr/local/share/boost
+          sudo docker rmi $(docker images -q) 2>/dev/null || true
+          sudo apt-get clean
+          df -h
+
+      - name: Add extra swap
+        run: |
+          sudo dd if=/dev/zero of=/mnt/extra-swapfile bs=1M count=8192
+          sudo chmod 600 /mnt/extra-swapfile
+          sudo mkswap /mnt/extra-swapfile
+          sudo swapon /mnt/extra-swapfile
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3 python3-dev build-essential git curl repo \
+            bc flex bison libssl-dev libelf-dev openjdk-17-jdk-headless rsync \
+            libxml2-utils zip unzip
+
+          git config --global user.email "ci@capivara.dev"
+          git config --global user.name "Capivara CI"
+
+      # ============================================================
+      # PARTE 1: KERNEL GKI (virtio-mmio + tpm_virtio)
+      # ============================================================
+      - name: '[Kernel] Repo sync (common-android16-6.12)'
+        run: |
+          mkdir -p /tmp/kernel && cd /tmp/kernel
+          repo init -u https://android.googlesource.com/kernel/manifest -b common-android16-6.12 --depth=1
+          repo sync -c -j$(nproc) -q --no-clone-bundle
+
+      - name: '[Kernel] Gerar pinned manifest de plataforma equivalente'
+        run: |
+          # Sync raso (só o XML de manifest, não código-fonte) de
+          # platform/manifest na branch android16-release, disparado
+          # SEGUNDOS depois do sync do kernel acima. Isso fixa qual
+          # revisão de plataforma é contemporânea a este kernel, sem pagar
+          # o custo de um segundo sync completo até a etapa de vendor.
+          mkdir -p /tmp/platform-manifest-only && cd /tmp/platform-manifest-only
+          repo init -u https://android.googlesource.com/platform/manifest \
+            -b android16-release --depth=1
+          cp .repo/manifests/default.xml /tmp/pinned-manifest-platform.xml
+          echo "=== Pinned platform manifest (branch-level, contemporâneo ao kernel) ==="
+          head -20 /tmp/pinned-manifest-platform.xml
+
+      - name: '[Kernel] Inject tpm_virtio driver into kernel tree'
+        run: |
+          cp "$GITHUB_WORKSPACE/kernel/drivers/char/tpm/tpm_virtio.c" \
+            /tmp/kernel/common/drivers/char/tpm/tpm_virtio.c
+
+          KCONFIG="/tmp/kernel/common/drivers/char/tpm/Kconfig"
+          if ! grep -q "TCG_VIRTIO" "$KCONFIG"; then
+            printf '\nconfig TCG_VIRTIO\n\ttristate "Virtio TPM Interface"\n\tdepends on TCG_TPM && VIRTIO\n\thelp\n\t  This driver provides TPM via virtio transport.\n\t  The VMM exposes a virtio device (ID 29) with a single\n\t  virtqueue for TPM command/response exchange.\n\n\t  To compile as a module, choose M; module: tpm_virtio.\n' >> "$KCONFIG"
+          fi
+
+          MAKEFILE="/tmp/kernel/common/drivers/char/tpm/Makefile"
+          if ! grep -q "tpm_virtio" "$MAKEFILE"; then
+            echo "obj-\$(CONFIG_TCG_VIRTIO) += tpm_virtio.o" >> "$MAKEFILE"
+          fi
+
+          VIRTIO_IDS="/tmp/kernel/common/include/uapi/linux/virtio_ids.h"
+          if ! grep -q "VIRTIO_ID_TPM" "$VIRTIO_IDS"; then
+            sed -i '/^#endif/i #define VIRTIO_ID_TPM\t\t\t29 /* virtio TPM */' "$VIRTIO_IDS" || \
+              echo "#define VIRTIO_ID_TPM 29" >> "$VIRTIO_IDS"
+          fi
+
+          echo "=== Injected files ==="
+          ls -la /tmp/kernel/common/drivers/char/tpm/tpm_virtio.c
+          grep -n "TCG_VIRTIO" "$KCONFIG"
+          grep -n "tpm_virtio" "$MAKEFILE"
+          grep "VIRTIO_ID_TPM" "$VIRTIO_IDS" || echo "VIRTIO_ID_TPM not in virtio_ids.h (fallback define in driver)"
+
+      - name: '[Kernel] Force kernel SUBLEVEL to match initramfs vermagic'
+        run: |
+          cd /tmp/kernel/common
+          echo "=== Before version patch ==="
+          grep -E "^(VERSION|PATCHLEVEL|SUBLEVEL) =" Makefile || true
+          # The current guest initramfs expects modules built for 6.12.89-android16-6-maybe-dirty-4k
+          sed -i 's/^SUBLEVEL = .*/SUBLEVEL = 89/' Makefile
+          echo "=== After version patch ==="
+          grep -E "^(VERSION|PATCHLEVEL|SUBLEVEL) =" Makefile || true
+
+      - name: '[Kernel] Patch defconfig'
+        run: |
+          cd /tmp/kernel/common
+          CONFIG="arch/arm64/configs/gki_defconfig"
+
+          echo "=== CONFIG_CMDLINE em todos os configs ==="
+          grep -rn "CONFIG_CMDLINE" /tmp/kernel/common/arch/arm64/configs/ 2>/dev/null || true
+          grep -rn "CONFIG_CMDLINE" /tmp/kernel/common/arch/arm64/ 2>/dev/null | grep -v "\.o:" | head -20 || true
+
+          echo "=== Todos os arquivos com bootconfig ==="
+          grep -rn "bootconfig" /tmp/kernel/common/arch/ 2>/dev/null | grep -v "\.o:" | head -50 || true
+
+          echo "=== Removendo bootconfig de todos os configs ==="
+          grep -rl "bootconfig" /tmp/kernel/common/arch/ 2>/dev/null | while read -r f; do
+            echo "Patching: $f"
+            sed -i 's/ bootconfig//g' "$f"
+            sed -i 's/bootconfig //g' "$f"
+          done
+
+          echo "=== Before patch ==="
+          grep -n -E "VIRTIO_BALLOON|VIRTIO_MMIO|TCG|CRYPTO_USER|DEVPORT|DRM_VIRTIO" "$CONFIG" || true
+
+          sed -i '/^CONFIG_VIRTIO_MMIO=/d' "$CONFIG"
+          sed -i '/^CONFIG_TCG_TPM=/d' "$CONFIG"
+          sed -i '/^CONFIG_TCG_VTPM_PROXY=/d' "$CONFIG"
+          sed -i '/^CONFIG_TCG_VIRTIO=/d' "$CONFIG"
+          sed -i '/^CONFIG_CRYPTO_USER=/d' "$CONFIG"
+          sed -i '/^# CONFIG_DRM_VIRTIO_GPU is not set$/d' "$CONFIG"
+          sed -i '/^CONFIG_DRM_VIRTIO_GPU=/d' "$CONFIG"
+          sed -i 's/ bootconfig//' "$CONFIG"
+
+          sed -i '/^CONFIG_VIRTIO_BALLOON=m$/a CONFIG_VIRTIO_MMIO=y' "$CONFIG"
+          sed -i '/^CONFIG_BUG_ON_DATA_CORRUPTION=y$/a CONFIG_CRYPTO_USER=y' "$CONFIG"
+          sed -i '/^# CONFIG_DEVPORT is not set$/a CONFIG_TCG_TPM=y\nCONFIG_TCG_VIRTIO=y' "$CONFIG"
+          sed -i '/^CONFIG_DRM=y$/a CONFIG_DRM_VIRTIO_GPU=y' "$CONFIG"
+
+          echo ""
+          echo "=== After patch ==="
+          grep -n -E "VIRTIO_MMIO|TCG|CRYPTO_USER|DRM_VIRTIO" "$CONFIG"
+
+      - name: '[Kernel] Build kernel (aarch64)'
+        run: |
+          cd /tmp/kernel
+          echo "Building kernel..."
+          ./tools/bazel run --config=local --lto=none //common:kernel_aarch64_dist -- --destdir=/tmp/kernel-dist/kernel
+
+      - name: '[Kernel] Collect artifacts'
+        run: |
+          mkdir -p /tmp/artifacts/kernel
+
+          echo "=== GKI module diagnostics ==="
+          find /tmp/kernel-dist -name "failover.ko" -o -name "virtio_blk.ko" 2>/dev/null || true
+          find /tmp/kernel-dist -name "*.ko" 2>/dev/null | sort | tee /tmp/artifacts/kernel/ko-list.txt || true
+
+          for f in \
+            /tmp/kernel-dist/kernel/Image \
+            /tmp/kernel-dist/kernel/arch/arm64/boot/Image \
+            /tmp/kernel-dist/kernel/boot.img; do
+            if [ -f "$f" ]; then
+              cp "$f" /tmp/artifacts/kernel/
+              echo "Found: $f"
+            fi
+          done
+
+          for f in \
+            /tmp/kernel-dist/kernel/system_dlkm.img \
+            /tmp/kernel-dist/kernel/system_dlkm_staging_archive.tar.gz; do
+            if [ -f "$f" ]; then
+              cp "$f" /tmp/artifacts/kernel/
+              echo "Found: $f"
+            fi
+          done
+
+          while IFS= read -r ko; do
+            rel="${ko#/tmp/kernel-dist/}"
+            mkdir -p "/tmp/artifacts/kernel/$(dirname "$rel")"
+            cp "$ko" "/tmp/artifacts/kernel/$rel"
+          done < <(find /tmp/kernel-dist -name "*.ko" 2>/dev/null | sort)
+
+          find /tmp/kernel -name "tpm_virtio.ko" -exec cp {} /tmp/artifacts/kernel/ \; 2>/dev/null || true
+
+          cp /tmp/pinned-manifest-platform.xml /tmp/artifacts/kernel/pinned-manifest-platform.xml
+
+          echo "=== Módulos coletados ==="
+          find /tmp/artifacts/kernel -name "*.ko" 2>/dev/null | sort | head -30 || true
+
+          echo ""
+          echo "=== Kernel artifacts ==="
+          ls -lhR /tmp/artifacts/kernel/
+
+      # ============================================================
+      # PARTE 2: VENDOR — Vulkan/gfxstream (vulkan.ranchu + libs)
+      # ============================================================
+      - name: '[Vendor] Repo init (platform manifest pinned ao snapshot do kernel)'
+        if: ${{ github.event.inputs.skip_vendor_build != 'true' }}
+        run: |
+          # Reusa o EXATO manifest XML resolvido na etapa do kernel
+          # (/tmp/pinned-manifest-platform.xml), em vez de rodar um segundo
+          # `repo init -b android16-release` independente — isso é o que
+          # de fato fecha a janela de risco: qualquer commit novo que
+          # tenha chegado em android16-release entre as duas etapas NÃO
+          # entra aqui, porque não estamos reconsultando a branch.
+          mkdir -p /tmp/platform/.repo/manifests && cd /tmp/platform
+          git init -q .repo/manifests
+          cp /tmp/pinned-manifest-platform.xml .repo/manifests/default.xml
+          git -C .repo/manifests add default.xml
+          git -C .repo/manifests -c user.email=ci@capivara.dev -c user.name="Capivara CI" \
+            commit -q -m "pinned manifest snapshot (contemporâneo ao kernel build)"
+          repo init -u .repo/manifests --partial-clone --clone-filter=blob:limit=10M --depth=1
+
+      - name: '[Vendor] Repo sync'
+        if: ${{ github.event.inputs.skip_vendor_build != 'true' }}
+        run: |
+          cd /tmp/platform
+          repo sync -c -j$(nproc) -q --no-clone-bundle --force-sync
+
+      - name: '[Vendor] Lunch + validar TARGET_VULKAN_SUPPORT'
+        if: ${{ github.event.inputs.skip_vendor_build != 'true' }}
+        run: |
+          cd /tmp/platform
+          source build/envsetup.sh
+          lunch "${{ github.event.inputs.lunch_target || 'aosp_cf_arm64_phone-userdebug' }}"
+          get_build_var TARGET_VULKAN_SUPPORT || echo "AVISO: TARGET_VULKAN_SUPPORT não definido ou get_build_var falhou — vulkan.ranchu pode não entrar no grafo de build."
+        shell: bash
+
+      - name: '[Vendor] Build módulos Vulkan/gfxstream (mm direcionado)'
+        if: ${{ github.event.inputs.skip_vendor_build != 'true' }}
+        run: |
+          cd /tmp/platform
+          source build/envsetup.sh
+          lunch "${{ github.event.inputs.lunch_target || 'aosp_cf_arm64_phone-userdebug' }}"
+
+          m vulkan.ranchu \
+            libvulkan_enc \
+            vulkan.pastel \
+            hwcomposer.ranchu \
+            libandroidemu \
+            libOpenglCodecCommon \
+            libOpenglSystemCommon \
+            libGLESv1_CM_emulation \
+            lib_renderControl_enc \
+            libEGL_emulation \
+            libGLESv2_enc \
+            libGLESv2_emulation \
+            libGLESv1_enc \
+            -j$(nproc) 2>&1 | tee /tmp/build-vulkan.log
+
+      - name: '[Vendor] Localizar e coletar artefatos'
+        if: ${{ github.event.inputs.skip_vendor_build != 'true' }}
+        run: |
+          cd /tmp/platform
+          mkdir -p /tmp/artifacts/vendor/lib64/hw /tmp/artifacts/vendor/lib64 /tmp/artifacts/logs
+
+          find out/target/product -iname "vulkan.ranchu*" -o -iname "vulkan.pastel*" \
+            -o -iname "libvulkan_enc*" -o -iname "hwcomposer.ranchu*" \
+            -o -iname "libandroidemu*" -o -iname "libOpenglCodecCommon*" \
+            -o -iname "libOpenglSystemCommon*" -o -iname "libGLESv1_CM_emulation*" \
+            -o -iname "lib_renderControl_enc*" -o -iname "libEGL_emulation*" \
+            -o -iname "libGLESv2_enc*" -o -iname "libGLESv2_emulation*" \
+            -o -iname "libGLESv1_enc*" 2>/dev/null | tee /tmp/artifact-paths.txt
+
+          if [ ! -s /tmp/artifact-paths.txt ]; then
+            echo "ERRO: nenhum artefato encontrado. Verifique build-vulkan.log e"
+            echo "confirme TARGET_VULKAN_SUPPORT=true para o lunch_target usado."
+            cp /tmp/build-vulkan.log /tmp/artifacts/logs/ 2>/dev/null || true
+            exit 1
+          fi
+
+          while IFS= read -r f; do
+            case "$f" in
+              */hw/*) cp -v "$f" /tmp/artifacts/vendor/lib64/hw/ 2>/dev/null || true ;;
+              *) cp -v "$f" /tmp/artifacts/vendor/lib64/ 2>/dev/null || true ;;
+            esac
+          done < /tmp/artifact-paths.txt
+
+          cp /tmp/build-vulkan.log /tmp/artifacts/logs/
+          cp /tmp/artifact-paths.txt /tmp/artifacts/logs/
+          repo manifest -r -o /tmp/artifacts/logs/effective-manifest-vendor.xml
+
+          cat > /tmp/artifacts/logs/file_contexts.snippet.txt << 'EOF'
+          /vendor/lib(64)?/hw/vulkan\.ranchu\.so u:object_r:same_process_hal_file:s0
+          /vendor/lib(64)?/libEGL_emulation\.so u:object_r:same_process_hal_file:s0
+          /vendor/lib(64)?/libGLESv1_CM_emulation\.so u:object_r:same_process_hal_file:s0
+          /vendor/lib(64)?/libGLESv2_emulation\.so u:object_r:same_process_hal_file:s0
+          /vendor/lib(64)?/libOpenglCodecCommon\.so u:object_r:same_process_hal_file:s0
+          /vendor/lib(64)?/libOpenglSystemCommon\.so u:object_r:same_process_hal_file:s0
+          /vendor/lib(64)?/lib_renderControl_enc\.so u:object_r:same_process_hal_file:s0
+          /vendor/lib(64)?/libGLESv1_enc\.so u:object_r:same_process_hal_file:s0
+          /vendor/lib(64)?/libGLESv2_enc\.so u:object_r:same_process_hal_file:s0
+          /vendor/lib(64)?/libvulkan_enc\.so u:object_r:same_process_hal_file:s0
+          /vendor/lib(64)?/hw/vulkan\.pastel\.so u:object_r:same_process_hal_file:s0
+          EOF
+
+          echo "=== Final artifacts (kernel + vendor) ==="
+          ls -lhR /tmp/artifacts/
+
+      # ============================================================
+      # UPLOAD — kernel e vendor saem juntos no mesmo artifact
+      # ============================================================
+      - name: Upload artifacts (kernel + vendor, mesmo snapshot do AOSP)
+        uses: actions/upload-artifact@v4
+        with:
+          name: capivara-full-stack-${{ github.run_id }}
+          path: /tmp/artifacts/
+          retention-days: 30
