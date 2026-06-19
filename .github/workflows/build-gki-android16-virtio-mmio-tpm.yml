@@ -115,6 +115,9 @@ jobs:
       - name: Collect artifacts
         run: |
           mkdir -p /tmp/artifacts
+
+          echo "=== GKI module diagnostics ==="
+          find /tmp/kernel-dist/kernel -name "failover.ko" -o -name "virtio_blk.ko" 2>/dev/null || true
           
           for f in \
             /tmp/kernel-dist/kernel/Image \
@@ -126,11 +129,15 @@ jobs:
             fi
           done
           
-          if [ -d "/tmp/kernel-dist/modules" ]; then
-            cp -r /tmp/kernel-dist/modules/* /tmp/artifacts/ 2>/dev/null || true
+          if [ -d "/tmp/kernel-dist/kernel/lib/modules" ]; then
+            mkdir -p /tmp/artifacts/modules
+            cp -r /tmp/kernel-dist/kernel/lib/modules/* /tmp/artifacts/modules/
           fi
           
           find /tmp/kernel -name "tpm_virtio.ko" -exec cp {} /tmp/artifacts/ \; 2>/dev/null || true
+
+          echo "=== Módulos coletados ==="
+          find /tmp/artifacts/modules -name "*.ko" 2>/dev/null | head -30 || true
           
           echo ""
           echo "=== Final artifacts ==="
