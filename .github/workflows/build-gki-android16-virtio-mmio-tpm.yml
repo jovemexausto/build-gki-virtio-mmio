@@ -129,6 +129,16 @@ jobs:
               echo "Found: $f"
             fi
           done
+
+          # system_dlkm contains the GKI modules needed to rebuild initramfs.
+          for f in \
+            /tmp/kernel-dist/kernel/system_dlkm.img \
+            /tmp/kernel-dist/kernel/system_dlkm_staging_archive.tar.gz; do
+            if [ -f "$f" ]; then
+              cp "$f" /tmp/artifacts/
+              echo "Found: $f"
+            fi
+          done
           
           while IFS= read -r ko; do
             rel="${ko#/tmp/kernel-dist/}"
