@@ -74,7 +74,6 @@ jobs:
           cd /tmp/kernel/common
           echo "=== Before version patch ==="
           grep -E "^(VERSION|PATCHLEVEL|SUBLEVEL) =" Makefile || true
-          # The current guest initramfs expects modules built for 6.12.89-android16-6-maybe-dirty-4k
           sed -i 's/^SUBLEVEL = .*/SUBLEVEL = 89/' Makefile
           echo "=== After version patch ==="
           grep -E "^(VERSION|PATCHLEVEL|SUBLEVEL) =" Makefile || true
@@ -84,13 +83,6 @@ jobs:
           cd /tmp/kernel/common
           CONFIG="arch/arm64/configs/gki_defconfig"
           
-          echo "=== CONFIG_CMDLINE em todos os configs ==="
-          grep -rn "CONFIG_CMDLINE" /tmp/kernel/common/arch/arm64/configs/ 2>/dev/null || true
-          grep -rn "CONFIG_CMDLINE" /tmp/kernel/common/arch/arm64/ 2>/dev/null | grep -v "\.o:" | head -20 || true
-
-          echo "=== Todos os arquivos com bootconfig ==="
-          grep -rn "bootconfig" /tmp/kernel/common/arch/ 2>/dev/null | grep -v "\.o:" | head -50 || true
-
           echo "=== Removendo bootconfig de todos os configs ==="
           grep -rl "bootconfig" /tmp/kernel/common/arch/ 2>/dev/null | while read -r f; do
             echo "Patching: $f"
@@ -99,7 +91,7 @@ jobs:
           done
           
           echo "=== Before patch ==="
-          grep -n -E "VIRTIO_BALLOON|VIRTIO_MMIO|TCG|CRYPTO_USER|DEVPORT|DRM_VIRTIO" "$CONFIG" || true
+          grep -n -E "VIRTIO_BALLOON|VIRTIO_MMIO|TCG|CRYPTO_USER|DEVPORT|DRM_VIRTIO|UDMABUF" "$CONFIG" || true
           
           # Remove any previous attempts / negations
           sed -i '/^CONFIG_VIRTIO_MMIO=/d' "$CONFIG"
@@ -109,6 +101,8 @@ jobs:
           sed -i '/^CONFIG_CRYPTO_USER=/d' "$CONFIG"
           sed -i '/^# CONFIG_DRM_VIRTIO_GPU is not set$/d' "$CONFIG"
           sed -i '/^CONFIG_DRM_VIRTIO_GPU=/d' "$CONFIG"
+          sed -i '/^CONFIG_UDMABUF=/d' "$CONFIG"
+          sed -i '/^# CONFIG_UDMABUF is not set$/d' "$CONFIG"
           sed -i 's/ bootconfig//' "$CONFIG"
 
           # Insert at exact anchor positions (confirmed by savedefconfig diff)
@@ -116,10 +110,14 @@ jobs:
           sed -i '/^CONFIG_BUG_ON_DATA_CORRUPTION=y$/a CONFIG_CRYPTO_USER=y' "$CONFIG"
           sed -i '/^# CONFIG_DEVPORT is not set$/a CONFIG_TCG_TPM=y\nCONFIG_TCG_VIRTIO=y' "$CONFIG"
           sed -i '/^CONFIG_DRM=y$/a CONFIG_DRM_VIRTIO_GPU=y' "$CONFIG"
+
+          # CONFIG_UDMABUF: required for VulkanAllocateHostVisibleAsUdmabuf in gfxstream
+          # Anchor: immediately after CONFIG_DRM_VIRTIO_GPU=y
+          sed -i '/^CONFIG_DRM_VIRTIO_GPU=y$/a CONFIG_UDMABUF=y' "$CONFIG"
           
           echo ""
           echo "=== After patch ==="
-          grep -n -E "VIRTIO_MMIO|TCG|CRYPTO_USER|DRM_VIRTIO" "$CONFIG"
+          grep -n -E "VIRTIO_MMIO|TCG|CRYPTO_USER|DRM_VIRTIO|UDMABUF" "$CONFIG"
 
       - name: Build kernel (aarch64)
         run: |
@@ -145,7 +143,7 @@ jobs:
             fi
           done
 
-          # system_dlkm contains the GKI modules needed to rebuild initramfs.
+          # system_dlkm contains the GKI modules needed to rebuild initramfs
           for f in \
             /tmp/kernel-dist/kernel/system_dlkm.img \
             /tmp/kernel-dist/kernel/system_dlkm_staging_archive.tar.gz; do
